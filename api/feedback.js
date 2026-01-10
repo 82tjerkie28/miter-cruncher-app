@@ -5,7 +5,7 @@ export default async function handler(request, response) {
         return response.status(405).json({ error: 'Method Not Allowed' });
     }
 
-    const { message } = request.body;
+    const { message, name, email } = request.body;
 
     if (!message || message.trim().length === 0) {
         return response.status(400).json({ error: 'Message cannot be empty' });
@@ -13,8 +13,8 @@ export default async function handler(request, response) {
 
     try {
         await sql`
-      INSERT INTO feedback (message)
-      VALUES (${message});
+      INSERT INTO feedback (message, name, email)
+      VALUES (${message}, ${name || null}, ${email || null});
     `;
         return response.status(200).json({ message: 'Feedback sent successfully!' });
     } catch (error) {
