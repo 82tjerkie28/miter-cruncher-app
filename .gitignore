@@ -29,3 +29,7 @@ dist-ssr
 .env
 .env.*
 !.env.example
+
+# Local Documentation & Assets
+Input/
+Notes/
