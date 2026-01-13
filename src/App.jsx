@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   Square, Minus, MousePointer2, Trash2,
   Undo2, Hexagon, RotateCcw, ZoomIn, ZoomOut, Hand, X, FlipVertical,
-  Crosshair, Mail, MessageSquare
+  Crosshair, Mail, MessageSquare, Eye, Lock, Unlock, ArrowDownToLine, Pencil
 } from 'lucide-react';
 import KeepMeInformedModal from './components/KeepMeInformedModal';
 import FeedbackModal from './components/FeedbackModal';
@@ -21,9 +21,12 @@ const BLUE_ULTRA_LIGHT = "#F5F5FF";
 
 const App = () => {
   const [mode, setMode] = useState('line');
-  const [thickness, setThickness] = useState(6);
+  const [thickness, setThickness] = useState(12);
   const [unit, setUnit] = useState('metric');
   const [metricSubUnit, setMetricSubUnit] = useState('cm');
+  const [precision, setPrecision] = useState(0);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [toolSide, setToolSide] = useState('right'); // 'right' (under) or 'left' (above)
   const [zoom, setZoom] = useState(1);
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [sides, setSides] = useState(6);
@@ -39,6 +42,7 @@ const App = () => {
   const [showSidesPopup, setShowSidesPopup] = useState(false);
   const [sawAngle, setSawAngle] = useState(0);
   const [miterGaugeAngle, setMiterGaugeAngle] = useState(0);
+  const [editingJoint, setEditingJoint] = useState(null); // { index, side, neighborIndex, neighborSide }
   const [isPanning, setIsPanning] = useState(false);
   const [showKeepMeInformed, setShowKeepMeInformed] = useState(false);
   const [showFeedback, setShowFeedback] = useState(false);
@@ -46,6 +50,7 @@ const App = () => {
   const [isStanding, setIsStanding] = useState(false);
   const [sawWarningDismissed, setSawWarningDismissed] = useState(false);
   const [miterWarningDismissed, setMiterWarningDismissed] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
 
   const [logicalW, setLogicalW] = useState(800);
   const containerRef = useRef(null);
@@ -78,6 +83,7 @@ const App = () => {
     };
 
     const handleKeyDown = (e) => {
+      if (isTyping) return;
       if (e.key === 'Escape') cancelDrawing();
       if (e.key.toLowerCase() === 'z' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
@@ -98,8 +104,12 @@ const App = () => {
 
   const formatLen = (px) => {
     const valCm = px / PIXELS_PER_CM;
-    if (unit === 'imperial') return (valCm * CM_TO_INCH).toFixed(2);
-    return metricSubUnit === 'mm' ? (valCm * 10).toFixed(0) : valCm.toFixed(1);
+    let val = valCm;
+    if (unit === 'imperial') val = valCm * CM_TO_INCH;
+    else if (metricSubUnit === 'mm') val = valCm * 10;
+
+    if (metricSubUnit === 'mm') return (Math.round(val * 10) / 10).toString(); // Max 1 decimal for mm
+    return (Math.round(val * 100) / 100).toString(); // Max 2 decimals for cm/inch
   };
 
   const parseInputToPx = (val) => {
@@ -109,6 +119,12 @@ const App = () => {
     if (unit === 'imperial') cm = num / CM_TO_INCH;
     else if (metricSubUnit === 'mm') cm = num / 10;
     return cm * PIXELS_PER_CM;
+  };
+
+  const pxToDisplay = (px) => {
+    const valCm = px / PIXELS_PER_CM;
+    if (unit === 'imperial') return valCm * CM_TO_INCH;
+    return metricSubUnit === 'mm' ? valCm * 10 : valCm;
   };
 
   const getMousePos = (e) => {
@@ -121,6 +137,7 @@ const App = () => {
   };
 
   const getSnappedPos = (pos) => {
+    if (!snapEnabled) return pos;
     let snapped = { ...pos };
     let minDist = SNAP_DIST / zoom;
     const gx = Math.round(pos.x / PIXELS_PER_CM) * PIXELS_PER_CM;
@@ -140,6 +157,13 @@ const App = () => {
     if (l2 === 0) return Math.hypot(p.x - v.x, p.y - v.y);
     let t = Math.max(0, Math.min(1, ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2));
     return Math.hypot(p.x - (v.x + t * (w.x - v.x)), p.y - (v.y + t * (w.y - v.y)));
+  };
+
+  const normalizeAngle = (deg) => {
+    let d = deg % 360;
+    if (d > 180) d -= 360;
+    if (d <= -180) d += 360;
+    return d;
   };
 
   const calculateAngles = (line, index) => {
@@ -165,12 +189,27 @@ const App = () => {
       const tSelf = line.thickness || thickness;
       const tOther = other.thickness || thickness;
 
-      const miterFromSide = Math.atan2(tSelf * Math.sin(theta), tOther + tSelf * Math.cos(theta));
-      const sawSetting = Math.abs(90 - (miterFromSide * 180 / Math.PI));
-      const bisectRel = (diff > 0) ? miterFromSide * 180 / Math.PI : -miterFromSide * 180 / Math.PI;
+      // Check for overrides
+      const myEnd = isStart ? 'left' : 'right';
+      const myOverride = line.miterOverrides?.[myEnd];
+
+      let miterAngleRad = Math.atan2(tSelf * Math.sin(theta), tOther + tSelf * Math.cos(theta));
+      let sawSetting = Math.abs(90 - (miterAngleRad * 180 / Math.PI));
+
+      if (myOverride !== undefined && myOverride !== null) {
+        sawSetting = myOverride;
+        // Recalculate rad just for visual correctness if needed, but sawSetting is key
+        miterAngleRad = (90 - sawSetting) * (Math.PI / 180);
+      }
+
+      // Snap saw setting if precision is 0
+      if (precision === 0) sawSetting = Math.round(sawSetting);
+      else sawSetting = parseFloat(sawSetting.toFixed(precision));
+
+      const bisectRel = (diff > 0) ? miterAngleRad * 180 / Math.PI : -miterAngleRad * 180 / Math.PI;
 
       return {
-        label: `${sawSetting.toFixed(1)}°`,
+        label: `${sawSetting.toFixed(precision)}°`,
         angle: sawSetting,
         bisectRel: bisectRel,
         labelOffsetAngle: a1 + (diff / 2) * (Math.PI / 180) + Math.PI
@@ -182,7 +221,14 @@ const App = () => {
   const getBoardPoints = (l, mLeft, mRight, isProfile = false, lineThickness) => {
     const angle = Math.atan2(l.y2 - l.y1, l.x2 - l.x1);
     const length = Math.hypot(l.x2 - l.x1, l.y2 - l.y1);
-    const h = ((lineThickness || thickness) / 20) * PIXELS_PER_CM;
+    const tPx = ((lineThickness || thickness) / 20) * PIXELS_PER_CM;
+
+    // Geometry: Reference Edge.
+    // Side 'right' (default) -> Draw 'positive Y' (downwards in SVG) -> [0, tPx]
+    // Side 'left' -> Draw 'negative Y' -> [-tPx, 0]
+    const isRight = (l.side || 'right') === 'right';
+    const yStart = isRight ? 0 : -tPx;
+    const yEnd = isRight ? tPx : 0;
 
     const getShift = (y_off, miter) => {
       if (Math.abs(miter.angle) < 0.01) return 0;
@@ -191,22 +237,28 @@ const App = () => {
     };
 
     let pts = [
-      { x: getShift(-h, mLeft), y: -h },
-      { x: length + getShift(-h, mRight), y: -h },
-      { x: length + getShift(h, mRight), y: h },
-      { x: getShift(h, mLeft), y: h }
+      { x: getShift(yStart, mLeft), y: yStart },
+      { x: length + getShift(yStart, mRight), y: yStart },
+      { x: length + getShift(yEnd, mRight), y: yEnd },
+      { x: getShift(yEnd, mLeft), y: yEnd }
     ];
 
     if (isProfile) {
       const minX = Math.min(...pts.map(p => p.x)), maxX = Math.max(...pts.map(p => p.x));
-      return pts.map(p => ({ x: p.x - ((minX + maxX) / 2) + 50, y: p.y }));
+      return pts.map(p => ({ x: p.x - ((minX + maxX) / 2) + 50, y: p.y - (yStart + yEnd) / 2 })); // Center vertically too
     }
     return pts.map(p => ({ x: l.x1 + p.x * Math.cos(angle) - p.y * Math.sin(angle), y: l.y1 + p.x * Math.sin(angle) + p.y * Math.cos(angle) }));
   };
 
   const handleMouseDown = (e) => {
+    if (editingJoint && mode !== 'select-obj') setEditingJoint(null); // Clear on click if not interacting
+    // Actually, clicking anywhere on canvas should clear unless on the UI box?
+    // The UI box has e.stopPropagation(). So valid canvas clicks are outside.
+    setEditingJoint(null);
+
     const rawPos = getMousePos(e);
-    const pos = getSnappedPos(rawPos);
+    // Snap start point too!
+    const pos = snapEnabled ? getSnappedPos(rawPos) : rawPos;
     if (mode === 'pan') { setIsPanning(true); return; }
 
     if (mode === 'select-point') {
@@ -233,10 +285,13 @@ const App = () => {
         if (Math.hypot(x2 - x1, y2 - y1) > 5) {
           saveHistory();
           let nl = [];
+
+          // ... (rest of element creation) ... 
+          // Re-inserted for clarity in replace_file
           if (type === 'line') {
-            nl = [{ x1, y1, x2, y2, thickness }]; setLines([...lines, ...nl]);
+            nl = [{ x1, y1, x2, y2, thickness, side: toolSide }]; setLines([...lines, ...nl]);
             if (chainOrigin && Math.hypot(x2 - chainOrigin.x, y2 - chainOrigin.y) < 5) { cancelDrawing(); }
-            else setActiveLine({ x1: x2, y1: y2, x2, y2, type: 'line', thickness });
+            else setActiveLine({ x1: x2, y1: y2, x2, y2, type: 'line', thickness, side: toolSide });
             return;
           } else if (type === 'rect') {
             nl = [{ x1: x1, y1: y1, x2: x2, y2: y1, thickness }, { x1: x2, y1: y1, x2: x2, y2: y2, thickness }, { x1: x2, y1: y2, x2: x1, y2: y2, thickness }, { x1: x1, y1: y2, x2: x1, y2: y1, thickness }];
@@ -249,7 +304,8 @@ const App = () => {
         }
         cancelDrawing();
       } else {
-        setActiveLine({ x1: pos.x, y1: pos.y, x2: pos.x, y2: pos.y, type: mode, thickness });
+        // Start Drawing
+        setActiveLine({ x1: pos.x, y1: pos.y, x2: pos.x, y2: pos.y, type: mode, thickness, side: toolSide });
         if (mode === 'line') setChainOrigin({ x: pos.x, y: pos.y });
       }
     }
@@ -277,6 +333,22 @@ const App = () => {
   };
 
   const handleMouseUp = () => { setIsPanning(false); setDragOffset(null); setSelectedPoint(null); };
+
+  const handlePencilClick = (idx, side) => {
+    const l = lines[idx];
+    const x = side === 'left' ? l.x1 : l.x2;
+    const y = side === 'left' ? l.y1 : l.y2;
+    const neighborIdx = lines.findIndex((ln, i) => i !== idx && (Math.hypot(ln.x1 - x, ln.y1 - y) < 2 || Math.hypot(ln.x2 - x, ln.y2 - y) < 2));
+
+    let nData = null;
+    if (neighborIdx !== -1) {
+      const neighbor = lines[neighborIdx];
+      const nSide = (Math.hypot(neighbor.x1 - x, neighbor.y1 - y) < 2) ? 'left' : 'right';
+      nData = { i: neighborIdx, side: nSide };
+    }
+    setEditingJoint({ p: { i: idx, side }, n: nData });
+    setMode('select-obj'); // Switch to select mode to avoid drawing
+  };
 
   const handleAngleSelection = (angle, key) => {
     setSawAngle(angle); setMiterGaugeAngle(angle);
@@ -324,6 +396,174 @@ const App = () => {
     setLines(nl);
   };
 
+  const toggleMiterOverride = (idx, side, value) => {
+    saveHistory();
+    const l = lines[idx];
+
+    // Find neighbor
+    const x = side === 'left' ? l.x1 : l.x2;
+    const y = side === 'left' ? l.y1 : l.y2;
+    const neighborIdx = lines.findIndex((ln, i) => i !== idx && (Math.hypot(ln.x1 - x, ln.y1 - y) < 2 || Math.hypot(ln.x2 - x, ln.y2 - y) < 2));
+
+    let newLines = [...lines];
+
+    // Update ME
+    const myOverrides = newLines[idx].miterOverrides || {};
+    const finalVal = value;
+
+    newLines[idx] = { ...newLines[idx], miterOverrides: { ...myOverrides, [side]: finalVal } };
+
+    // Update NEIGHBOR with reciprocal logic
+    if (neighborIdx !== -1 && finalVal !== null) {
+      const neighbor = newLines[neighborIdx];
+      const nSide = (Math.hypot(neighbor.x1 - x, neighbor.y1 - y) < 2) ? 'left' : 'right';
+      const nOverrides = neighbor.miterOverrides || {};
+
+      // Calculate geometric sum: For a standard corner, angles usually sum a certain way.
+      // But simpler heuristic requested: "When you add a degree, opposing side has a degree less".
+      // We need to know the Previous Value to know the Delta.
+      // If no override existed, we need the calculated angle.
+
+      // Let's get the calculated angles for both BEFORE this change.
+      // Actually, easier: get the current neighbor value (override or calc) and apply -delta.
+      // But we don't easily have 'previous value' here without more complex state.
+
+      // Alternative: Just set neighbor to (TotalAngle - finalVal)? 
+      // Most corners are 90deg. If I set one to 46, other should be 44.
+      // This assumes a 90deg corner. What if it's 120?
+      // Let's try to infer the "Total Corner Angle" from geometry and preserve it.
+
+      // 1. Get vector for Line A (IsStart ? flipped : normal)
+      // 2. Get vector for Line B
+      // 3. Angle between them.
+      // 4. Miter A + Miter B should approx equal (Angle / 2) * 2 = Angle? 
+      // Actually, typically Miter = Angle / 2.
+      // So MiterA + MiterB = Total Corner Angle (in miter-speak, usually 90 for a 90 corner? No, 45+45=90).
+
+      // So, let's calculate the geometric angle between the lines.
+      const v1 = side === 'left' ? { x: l.x2 - l.x1, y: l.y2 - l.y1 } : { x: l.x1 - l.x2, y: l.y1 - l.y2 }; // Vector pointing IN to vertex
+      const v2 = nSide === 'left' ? { x: neighbor.x2 - neighbor.x1, y: neighbor.y2 - neighbor.y1 } : { x: neighbor.x1 - neighbor.x2, y: neighbor.y1 - neighbor.y2 }; // Vector pointing IN to vertex
+
+      const a1 = Math.atan2(v1.y, v1.x);
+      const a2 = Math.atan2(v2.y, v2.x);
+      let diffConfig = (a2 - a1) * 180 / Math.PI;
+      while (diffConfig > 180) diffConfig -= 360; while (diffConfig < -180) diffConfig += 360;
+
+      // The "Corner Angle" in woodworking terms is often (180 - abs(diff)). 
+      // E.g. 90 deg corner -> diff is 90. 
+      // If I set one miter to 46, the other should be (CornerAngle - 46).
+      // If corner is 90, 90-46 = 44.
+      // If corner is 135 (octagon), miters are 67.5. Tot = 135.
+
+      // So... targetNeighbor = (TotalCornerAngle/2 * 2) - finalVal? 
+      // Wait, standard miter is (TotalAngle / 2). 
+      // Let's calculate the natural geometric split.
+      // Theta = abs(diff) / 2.
+      // Natural miter = 90 - Theta (if we talk saw setting relative to fence?)
+      // This app stores 'sawAngle' as relative to 90? Or relative to board edge?
+      // Line 196: sawSetting = Math.abs(90 - (miterAngleRad * 180 / Math.PI));
+      // So 0 = Square (90 cut). 45 = 45 cut.
+
+      // If board edge is 0... 
+      // Let's assume the "Sum of Cuts" should be constant.
+      // Constant = CurrentAngleA + CurrentAngleB.
+      // If we are initiating a change (no locks yet), assume standard miter was the start.
+      // Standard: A=X, B=X. Sum=2X.
+      // New A=Y. New B = 2X - Y.
+
+      // Let's re-calculate the geometric "standard" miter for this corner to get 2X.
+      // We can reuse the logic from calculateAngles but stripped down.
+      // Or just trusted: The sum of the *Geometric* bisected angles is the invariant.
+
+      // Simplified approach for V1.3:
+      // If the User sets Value A, we force Value B to be (IdealSum - Value A).
+      // IdealSum is usually 2 * IdealMiter.
+      // What is IdealMiter? It's what calculateAngles returns for this corner without overrides!
+
+      // Let's calculated the "Natural" angles (without overrides) for this junction.
+      const rawAnglesMe = calculateAngles(l, idx); // This MIGHT use newLines which has override? 
+      // We need 'pure' geometry. calculateAngles reads specific overrides.
+      // Let's temporarily strip overrides to get pure geometry?
+
+      // Actually, we can just calculate the corner angle from vectors calculated above.
+      // diffConfig is the angle between lines.
+      // The miter cut is usually half of that.
+      // Angle of cut relative to board edge...
+      // For a 90 degree corner, board edge to cut is 45.
+      // For a straight line (180), cut is 0 (or 90?).
+
+      // Let's use the UI's definition of angle: "Saw Setting".
+      // 45 deg corner (octagon): Saw setting 22.5. Sum = 45.
+      // 90 deg corner: Saw setting 45. Sum = 90.
+      // So Constant = SawA + SawB.
+
+      // Let's compute this Constant.
+      // We can use the previously calculated values from existing state? 
+      // But they might be overridden already.
+      // Let's just assume the "Ideal" is the geometric bisection.
+
+      const thetaRad = Math.abs(diffConfig) * (Math.PI / 180); // Angle between lines
+      // Miter cut angle relative to board edge is derived from (PI - Theta)/2 ?
+      // Let's stick to the 'sawSetting' logic:
+      // If diff is 90. Theta=90.
+      // miterAngleRad (cut normal) approx 45 deg from board normal.
+      // sawSetting = 45.
+      // Sum = 90.
+      // So Sum = (180 - abs(diff)) ? No.
+      // 90 corner -> 90 sum.
+      // 135 corner (octagon) -> 135 internal angle? 
+      // Octagon: 135 internal. turn angle 45.
+      // Saw setting 22.5. Sum 45.
+      // It seems Sum = Turn Angle (180 - Internal).
+
+      // Let's try: K = abs(diffConfig). 
+      // If 90 corner (L shape), diff is 90?
+      // Yes.
+      // So Neighbor = abs(diffConfig) - finalVal.
+
+      const totalAngle = Math.abs(diffConfig);
+      // Note: diffConfig can be 90 or -90.
+      // Let's verify with 90 deg corner. totalAngle = 90.
+      // Set to 46. Neighbor = 90 - 46 = 44. Correct.
+      // Set to 0. Neighbor = 90. Correct (butt joint).
+
+      let nVal = totalAngle - finalVal;
+      if (nVal < 0) nVal = 0; // Clamp?
+
+      // Update Neighbor
+      newLines[neighborIdx] = { ...neighbor, miterOverrides: { ...nOverrides, [nSide]: nVal } };
+    }
+
+    setLines(newLines);
+  };
+
+  const clearMiterOverride = (idx, side) => {
+    saveHistory();
+    const l = lines[idx];
+
+    // Find neighbor
+    const x = side === 'left' ? l.x1 : l.x2;
+    const y = side === 'left' ? l.y1 : l.y2;
+    const neighborIdx = lines.findIndex((ln, i) => i !== idx && (Math.hypot(ln.x1 - x, ln.y1 - y) < 2 || Math.hypot(ln.x2 - x, ln.y2 - y) < 2));
+
+    let newLines = [...lines];
+
+    // Clear Me
+    const myOverrides = newLines[idx].miterOverrides || {};
+    const { [side]: removed, ...rest } = myOverrides;
+    newLines[idx] = { ...newLines[idx], miterOverrides: rest };
+
+    // Clear Neighbor (Reciprocal Revert)
+    if (neighborIdx !== -1) {
+      const neighbor = newLines[neighborIdx];
+      const nSide = (Math.hypot(neighbor.x1 - x, neighbor.y1 - y) < 2) ? 'left' : 'right';
+      const nOverrides = neighbor.miterOverrides || {};
+      const { [nSide]: nRemoved, ...nRest } = nOverrides;
+      newLines[neighborIdx] = { ...neighbor, miterOverrides: nRest };
+    }
+
+    setLines(newLines);
+  };
   const updateLineThickness = (idx, thick) => {
     saveHistory();
     setLines(lines.map((l, i) => i === idx ? { ...l, thickness: thick } : l));
@@ -337,11 +577,15 @@ const App = () => {
   );
 
   const ToolBtn = ({ icon, label, active, onClick, children, style }) => (
-    <div className="relative group">
-      <button onClick={onClick} className={`p-2 w-full rounded-xl flex flex-col items-center justify-center gap-1 transition-all border shadow-sm h-20 min-h-[80px]`} style={{ backgroundColor: active ? BLUE_PURE : 'white', color: active ? 'white' : BLUE_PURE, borderColor: active ? BLUE_PURE : BLUE_LIGHT, ...style }}>
+    <div className={`w-full transition-all duration-300 ease-in-out bg-transparent overflow-hidden ${children && active ? 'rounded-xl mb-2' : ''}`}>
+      <button onClick={onClick} className={`p-2 w-full rounded-xl flex flex-col items-center justify-center gap-1 transition-all border shadow-sm h-20 min-h-[80px] z-10 relative ${active ? (children ? 'rounded-b-none border-b-0' : '') : ''}`} style={{ backgroundColor: active ? BLUE_PURE : 'white', color: active ? 'white' : BLUE_PURE, borderColor: active ? BLUE_PURE : BLUE_LIGHT, ...style }}>
         {icon}<span className="text-[10px] font-black uppercase text-center leading-none mt-1">{label}</span>
       </button>
-      {children}
+      {children && active && (
+        <div className="p-3 bg-blue-50 rounded-b-xl flex flex-col gap-3 animation-slide-down relative top-[-1px] pt-4" style={{ backgroundColor: '#F0F4FF' }}>
+          {children}
+        </div>
+      )}
     </div>
   );
 
@@ -353,27 +597,51 @@ const App = () => {
           <ToolBtn active={mode === 'select-point'} onClick={() => { setMode('select-point'); cancelDrawing(); }} icon={<Crosshair size={22} />} label="SELECT POINT" />
           <hr className="my-1" style={{ borderColor: BLUE_ULTRA_LIGHT }} />
 
-          <ToolBtn active={mode === 'line'} onClick={() => setMode('line')} icon={<Minus size={22} />} label="LINE" />
+          <ToolBtn active={mode === 'line'} onClick={() => setMode('line')} icon={<Minus size={22} />} label="LINE">
+            <div className="flex flex-col gap-1">
+              <label className="text-[10px] font-black uppercase text-blue-600">Thickness</label>
+              <div className="flex items-center gap-1">
+                <input type="number" value={thickness} onChange={e => setThickness(Number(e.target.value))} className="w-full border rounded p-1 text-center font-bold text-sm outline-none bg-white" style={{ borderColor: BLUE_LIGHT, color: BLUE_PURE }} />
+                <span className="text-[10px] font-bold text-blue-400">mm</span>
+              </div>
+            </div>
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] font-black uppercase text-blue-600">Snap Grid</label>
+              <input type="checkbox" checked={snapEnabled} onChange={e => setSnapEnabled(e.target.checked)} className="accent-blue-600 w-4 h-4" />
+            </div>
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] font-black uppercase text-blue-600">Flip Side</label>
+              <button onClick={() => setToolSide(s => s === 'left' ? 'right' : 'left')} className="px-2 py-1 text-[10px] font-bold rounded border bg-white" style={{ borderColor: BLUE_LIGHT, color: BLUE_PURE }}>{toolSide === 'left' ? 'Flip' : 'Normal'}</button>
+            </div>
+          </ToolBtn>
           <ToolBtn active={mode === 'rect'} onClick={() => setMode('rect')} icon={<Square size={22} />} label="RECTANGLE" />
           <ToolBtn active={mode === 'polygon'} onClick={() => { setMode('polygon'); setShowSidesPopup(!showSidesPopup); }} icon={<Hexagon size={22} />} label={`POLYGON (${sides})`}>
-            {showSidesPopup && (
-              <div className="absolute left-full top-0 ml-4 p-3 rounded-xl shadow-2xl flex flex-col items-center gap-2 z-[70] border bg-white min-w-[80px]" style={{ borderColor: BLUE_PURE }}>
-                <label className="text-[10px] font-black uppercase text-blue-600">Sides</label>
-                <input autoFocus type="number" min="3" max="24" value={sides} onChange={e => setSides(Math.max(3, Number(e.target.value)))} className="w-full border text-center font-bold text-sm outline-none rounded p-1" style={{ borderColor: BLUE_LIGHT, color: BLUE_PURE }} />
-                <button onClick={() => setShowSidesPopup(false)} className="w-full text-[10px] font-black py-1 rounded text-white" style={{ backgroundColor: BLUE_PURE }}>SET</button>
-              </div>
-            )}
+            <div className="flex flex-col items-center gap-2">
+              <label className="text-[10px] font-black uppercase text-blue-600">Sides</label>
+              <input autoFocus type="number" min="3" max="24" value={sides} onChange={e => setSides(Math.max(3, Number(e.target.value)))} className="w-full border text-center font-bold text-sm outline-none rounded p-1 bg-white" style={{ borderColor: BLUE_LIGHT, color: BLUE_PURE }} />
+            </div>
           </ToolBtn>
           <hr className="my-1" style={{ borderColor: BLUE_ULTRA_LIGHT }} />
 
           <ToolBtn onClick={undo} icon={<Undo2 size={22} />} label="UNDO" />
-          <ToolBtn onClick={() => { saveHistory(); setLines([]); }} icon={<Trash2 size={22} style={{ color: THEME_ORANGE }} />} label="CLEAR" />
+          <ToolBtn onClick={() => { if (window.confirm("Are you sure? This will remove all drawings.")) { saveHistory(); setLines([]); setSelectedId(null); setActiveLine(null); setSawAngle(0); setMiterGaugeAngle(0); setActiveMiterKey(null); } }} icon={<Trash2 size={22} style={{ color: THEME_ORANGE }} />} label="CLEAR" />
 
           <div className="flex flex-col gap-2 p-2 rounded-xl border bg-white my-1" style={{ backgroundColor: BLUE_ULTRA_LIGHT, borderColor: BLUE_LIGHT }}>
-            <button onClick={() => setUnit(unit === 'metric' ? 'imperial' : 'metric')} className="text-[10px] font-bold bg-white px-1 py-2 rounded shadow-sm border uppercase w-full" style={{ color: BLUE_PURE, borderColor: BLUE_LIGHT }}>{unit === 'metric' ? 'Metric' : 'Imp'}</button>
-            <div className="flex items-center justify-center gap-1 border-t pt-2" style={{ borderColor: BLUE_LIGHT }}>
-              <input type="number" value={thickness} onChange={e => setThickness(Number(e.target.value))} className="w-full text-center bg-transparent font-bold text-[12px] outline-none" style={{ color: BLUE_PURE }} />
-              <span className="text-[10px] font-bold" style={{ color: BLUE_MEDIUM }}>mm</span>
+            <button onClick={() => setUnit(unit === 'metric' ? 'imperial' : 'metric')} className="text-[10px] font-bold bg-white px-1 py-2 rounded shadow-sm border uppercase w-full transition-colors" style={{ color: BLUE_PURE, borderColor: BLUE_LIGHT }}>{unit === 'metric' ? 'Metric' : 'Imp'}</button>
+            {unit === 'metric' && (
+              <div className="flex bg-white rounded border overflow-hidden" style={{ borderColor: BLUE_LIGHT }}>
+                <button onClick={() => setMetricSubUnit('cm')} className={`flex-1 text-[10px] font-bold py-1 ${metricSubUnit === 'cm' ? 'bg-blue-100' : 'bg-white'}`} style={{ color: BLUE_PURE }}>CM</button>
+                <div className="w-px bg-blue-100"></div>
+                <button onClick={() => setMetricSubUnit('mm')} className={`flex-1 text-[10px] font-bold py-1 ${metricSubUnit === 'mm' ? 'bg-blue-100' : 'bg-white'}`} style={{ color: BLUE_PURE }}>MM</button>
+              </div>
+            )}
+            <div className="flex items-center justify-between px-1">
+              <span className="text-[8px] font-bold text-blue-400 uppercase">Precision</span>
+              <select value={precision} onChange={e => setPrecision(Number(e.target.value))} className="text-[10px] font-bold bg-transparent outline-none">
+                <option value={0}>0</option>
+                <option value={1}>0.1</option>
+                <option value={2}>0.01</option>
+              </select>
             </div>
           </div>
 
@@ -401,21 +669,87 @@ const App = () => {
                       const isSelected = selectedId === i;
 
                       const renderMiterLabel = (x, y, miter, sideKey) => {
-                        const pushDist = 24 / zoom;
-                        const lx = x + pushDist * Math.cos(miter.labelOffsetAngle);
-                        const ly = y + pushDist * Math.sin(miter.labelOffsetAngle);
                         const miterKey = `${i}-${sideKey}`;
                         const isMiterActive = activeMiterKey === miterKey;
 
-                        // Dimensions calculated to stay roughly constant on screen
-                        const rectW = 40 / zoom;
-                        const rectH = 20 / zoom;
+                        // Check if this joint is being edited
+                        const isEditingMe = editingJoint?.p?.i === i && editingJoint?.p?.side === sideKey;
+                        const isEditingNeighbor = editingJoint?.n?.i === i && editingJoint?.n?.side === sideKey;
+                        const isEditingThisJoint = isEditingMe || isEditingNeighbor;
+
+                        // If editing, shift "Inwards" along the line to separate them
+                        let lx = x, ly = y;
+
+                        if (isEditingThisJoint) {
+                          // Move along the board vector
+                          const boardAngle = sideKey === 'left'
+                            ? Math.atan2(l.y2 - l.y1, l.x2 - l.x1)
+                            : Math.atan2(l.y1 - l.y2, l.x1 - l.x2);
+
+                          // Shift away from vertex along board, and slightly 'out' (labelOffset)
+                          const distAlong = 50 / zoom;
+                          const distOut = 20 / zoom;
+
+                          lx = x + distAlong * Math.cos(boardAngle) + distOut * Math.cos(miter.labelOffsetAngle);
+                          ly = y + distAlong * Math.sin(boardAngle) + distOut * Math.sin(miter.labelOffsetAngle);
+
+                        } else {
+                          const pushDist = 24 / zoom;
+                          lx = x + pushDist * Math.cos(miter.labelOffsetAngle);
+                          ly = y + pushDist * Math.sin(miter.labelOffsetAngle);
+                        }
+
+                        const rectW = isEditingThisJoint ? 90 / zoom : 40 / zoom;
+                        const rectH = isEditingThisJoint ? 50 / zoom : 20 / zoom;
                         const fs = 10 / zoom;
 
                         return (
-                          <g className="pointer-events-auto cursor-pointer" key={miterKey} onClick={(e) => { e.stopPropagation(); handleAngleSelection(miter.angle, miterKey); }}>
-                            <rect x={lx - rectW / 2} y={ly - rectH / 2} width={rectW} height={rectH} rx={4 / zoom} fill={isMiterActive ? THEME_ORANGE : "white"} stroke={THEME_ORANGE} strokeWidth={1 / zoom} />
-                            <text x={lx} y={ly} dominantBaseline="middle" textAnchor="middle" fill={isMiterActive ? "white" : THEME_ORANGE} fontSize={fs} fontWeight="800" className="select-none">{miter.label}</text>
+                          <g className="pointer-events-auto cursor-pointer group" key={miterKey}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onClick={(e) => { e.stopPropagation(); handleAngleSelection(miter.angle, miterKey); }}>
+
+                            {/* Background Box */}
+                            <rect x={lx - rectW / 2} y={ly - rectH / 2} width={rectW} height={rectH} rx={4 / zoom} fill={isMiterActive || isEditingThisJoint ? "white" : "white"} stroke={THEME_ORANGE} strokeWidth={(isEditingThisJoint ? 2 : 1) / zoom} className="shadow-sm" />
+
+                            {isEditingThisJoint ? (
+                              <foreignObject x={lx - rectW / 2} y={ly - rectH / 2} width={rectW} height={rectH}>
+                                <div className="flex flex-col items-center justify-center h-full gap-1 p-1">
+                                  {/* Input */}
+                                  <div className="flex items-center gap-1">
+                                    <input
+                                      type="number"
+                                      value={miter.angle.toFixed(1)}
+                                      onClick={e => e.stopPropagation()}
+                                      onChange={e => {
+                                        const val = parseFloat(e.target.value);
+                                        if (!isNaN(val)) toggleMiterOverride(i, sideKey, val);
+                                      }}
+                                      className="w-full text-center font-bold text-xs outline-none bg-blue-50 rounded px-1 text-blue-900 border border-blue-100"
+                                      style={{ fontSize: `${10 / zoom}px` }}
+                                    />
+                                    <span className="text-[8px] text-blue-400" style={{ fontSize: `${8 / zoom}px` }}>°</span>
+                                  </div>
+                                  {/* Buttons: Square & Revert */}
+                                  <div className="flex gap-2">
+                                    <button title="Square" onClick={(e) => { e.stopPropagation(); toggleMiterOverride(i, sideKey, 0); }} className="p-0.5 rounded bg-orange-100 hover:bg-orange-200 text-orange-600"><ArrowDownToLine size={12 / zoom} /></button>
+                                    <button title="Revert" onClick={(e) => { e.stopPropagation(); clearMiterOverride(i, sideKey); }} className="p-0.5 rounded bg-gray-100 hover:bg-gray-200 text-gray-600"><RotateCcw size={12 / zoom} /></button>
+                                  </div>
+                                </div>
+                              </foreignObject>
+                            ) : (
+                              <>
+                                <text x={lx} y={ly} dominantBaseline="middle" textAnchor="middle" fill={isMiterActive ? THEME_ORANGE : THEME_ORANGE} fontSize={fs} fontWeight="800" className="select-none">{miter.label}</text>
+                                {/* Hover Tools - Pencil (Only if not editing) */}
+                                <g className="opacity-0 group-hover:opacity-100 transition-opacity" transform={`translate(${lx + rectW / 2 + 5 / zoom}, ${ly - rectH / 2})`}>
+                                  <rect x="0" y="0" width={20 / zoom} height={20 / zoom} rx={4 / zoom} fill="white" stroke={BLUE_LIGHT} strokeWidth={1 / zoom} />
+                                  <foreignObject x="0" y="0" width={20 / zoom} height={20 / zoom}>
+                                    <div className="flex items-center justify-center w-full h-full cursor-pointer hover:bg-blue-50" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); handlePencilClick(i, sideKey); }}>
+                                      <Pencil size={12 / zoom} className="text-blue-500" />
+                                    </div>
+                                  </foreignObject>
+                                </g>
+                              </>
+                            )}
                           </g>
                         );
                       };
@@ -433,12 +767,23 @@ const App = () => {
                     })}
                     {activeLine && (
                       <g>
-                        <line x1={activeLine.x1} y1={activeLine.y1} x2={activeLine.x2} y2={activeLine.y2} stroke={THEME_ORANGE} strokeWidth={2 / zoom} strokeDasharray="4 4" />
-                        <text x={(activeLine.x1 + activeLine.x2) / 2} y={(activeLine.y1 + activeLine.y2) / 2 - 12 / zoom} fill={THEME_ORANGE} fontSize={12 / zoom} fontWeight="bold" textAnchor="middle" className="pointer-events-none">{formatLen(Math.hypot(activeLine.x2 - activeLine.x1, activeLine.y2 - activeLine.y1))}</text>
+                        {activeLine.type === 'rect' ? (
+                          <>
+                            {/* Ghost Rect */}
+                            <rect x={Math.min(activeLine.x1, activeLine.x2)} y={Math.min(activeLine.y1, activeLine.y2)} width={Math.abs(activeLine.x2 - activeLine.x1)} height={Math.abs(activeLine.y2 - activeLine.y1)} fill="none" stroke={BLUE_PURE} strokeWidth={2 / zoom} strokeDasharray="4 4" />
+                            <text x={(activeLine.x1 + activeLine.x2) / 2} y={(activeLine.y1 + activeLine.y2) / 2} fill={BLUE_PURE} fontSize={12 / zoom} fontWeight="bold" textAnchor="middle" className="pointer-events-none">{formatLen(Math.abs(activeLine.x2 - activeLine.x1))} x {formatLen(Math.abs(activeLine.y2 - activeLine.y1))}</text>
+                          </>
+                        ) : (
+                          <>
+                            <line x1={activeLine.x1} y1={activeLine.y1} x2={activeLine.x2} y2={activeLine.y2} stroke={BLUE_PURE} strokeWidth={2 / zoom} strokeDasharray="4 4" />
+                            <text x={(activeLine.x1 + activeLine.x2) / 2} y={(activeLine.y1 + activeLine.y2) / 2 - 12 / zoom} fill={BLUE_PURE} fontSize={12 / zoom} fontWeight="bold" textAnchor="middle" className="pointer-events-none">{formatLen(Math.hypot(activeLine.x2 - activeLine.x1, activeLine.y2 - activeLine.y1))} {metricSubUnit}</text>
+                          </>
+                        )}
                       </g>
                     )}
                   </svg>
                   <div className="absolute bottom-6 right-6 flex flex-col gap-2 z-30">
+                    <button onClick={() => { if (window.confirm("Are you sure? This will remove all drawings.")) { saveHistory(); setLines([]); setSelectedId(null); setActiveLine(null); setSawAngle(0); setMiterGaugeAngle(0); setActiveMiterKey(null); } }} className="w-11 h-11 bg-white border border-blue-200 rounded-full shadow-lg flex items-center justify-center text-blue-600 hover:bg-blue-50 transition-colors"><Trash2 size={20} style={{ color: THEME_ORANGE }} /></button>
                     <button onClick={() => { setMode('pan'); cancelDrawing(); }} className={`w-11 h-11 rounded-full shadow-lg flex items-center justify-center transition-colors border`} style={{ backgroundColor: mode === 'pan' ? BLUE_PURE : 'white', color: mode === 'pan' ? 'white' : BLUE_PURE, borderColor: mode === 'pan' ? BLUE_PURE : BLUE_LIGHT }}><Hand size={20} /></button>
                     <button onClick={() => { setZoom(z => Math.min(4, z + 0.4)); cancelDrawing(); }} className="w-11 h-11 bg-white border border-blue-200 rounded-full shadow-lg flex items-center justify-center text-blue-600 hover:bg-blue-50 transition-colors"><ZoomIn size={20} /></button>
                     <button onClick={() => { setZoom(z => Math.max(0.2, z - 0.4)); cancelDrawing(); }} className="w-11 h-11 bg-white border border-blue-200 rounded-full shadow-lg flex items-center justify-center text-blue-600 hover:bg-blue-50 transition-colors"><ZoomOut size={20} /></button>
@@ -450,20 +795,89 @@ const App = () => {
                 <div className="flex-1 overflow-auto">
                   <table className="w-full text-left border-collapse">
                     <thead className="text-xs uppercase font-black sticky top-0 z-10" style={{ backgroundColor: BLUE_ULTRA_LIGHT, color: BLUE_PURE }}>
-                      <tr><th className="p-3 border-b">ID & PROFILE</th><th className="p-3 border-b">LENGTH ({unit === 'metric' ? metricSubUnit : 'in'})</th><th className="p-3 border-b">THICKNESS</th><th className="p-3 border-b text-center">LEFT CUT</th><th className="p-3 border-b text-center">RIGHT CUT</th></tr>
+                      <tr>
+                        <th className="p-3 border-b">ID & PROFILE</th>
+                        <th className="p-3 border-b text-center">THICKNESS</th>
+                        <th className="p-3 border-b text-center">OUTSIDE</th>
+                        <th className="p-3 border-b text-center">INSIDE</th>
+                        <th className="p-3 border-b text-center">LEFT CUT</th>
+                        <th className="p-3 border-b text-center">RIGHT CUT</th>
+                      </tr>
                     </thead>
                     <tbody>
                       {lines.map((l, i) => {
                         const angles = calculateAngles(l, i);
                         const profilePts = getBoardPoints({ x1: 15, y1: 20, x2: 85, y2: 20 }, angles.left, angles.right, true, l.thickness);
+                        const realPts = getBoardPoints(l, angles.left, angles.right, false, l.thickness);
+                        const len1 = Math.hypot(realPts[1].x - realPts[0].x, realPts[1].y - realPts[0].y);
+                        const len2 = Math.hypot(realPts[2].x - realPts[3].x, realPts[2].y - realPts[3].y);
+                        const outsideLen = Math.max(len1, len2);
+                        const insideLen = Math.min(len1, len2);
+
                         const isSelected = selectedId === i;
+
+                        const renderAngleCell = (angleData, side) => {
+                          const miterKey = `${i}-${side}`;
+                          const isActive = activeMiterKey === miterKey;
+                          const isLocked = l.miterOverrides?.[side] !== undefined && l.miterOverrides?.[side] !== null;
+
+                          return (
+                            <div className="flex items-center justify-center gap-1 group/cell">
+                              <input
+                                type="number"
+                                value={angleData.angle.toFixed(precision === 0 ? 0 : precision)}
+                                onClick={(e) => e.stopPropagation()}
+                                onChange={(e) => {
+                                  const val = parseFloat(e.target.value);
+                                  if (!isNaN(val)) toggleMiterOverride(i, side, val);
+                                }}
+                                className={`font-bold text-xs w-12 text-center tabular-nums px-1 rounded border border-transparent hover:border-blue-200 outline-none ${isActive ? 'bg-orange-500 text-white' : 'bg-transparent'}`}
+                              />
+                              <div className="flex gap-1 ml-1 opacity-100">
+                                <button title="View" onClick={(e) => { e.stopPropagation(); handleAngleSelection(angleData.angle, miterKey); setSelectedId(i); }} className={`p-1 rounded ${isActive ? 'bg-blue-100 text-blue-600' : 'hover:bg-blue-100 text-blue-600'}`}><Eye size={12} /></button>
+                                <button title="Square End" onClick={(e) => { e.stopPropagation(); toggleMiterOverride(i, side, 0); setSelectedId(i); }} className={`p-1 rounded ${l.miterOverrides?.[side] === 0 ? 'bg-orange-500 text-white' : 'hover:bg-blue-100 text-blue-600'}`}><ArrowDownToLine size={12} /></button>
+                                <button title="Revert" onClick={(e) => { e.stopPropagation(); clearMiterOverride(i, side); setSelectedId(i); }} className={`p-1 rounded hover:bg-blue-100 text-blue-600`}><RotateCcw size={12} /></button>
+                                <button title={isLocked ? "Unlock" : "Lock"} onClick={(e) => { e.stopPropagation(); toggleMiterOverride(i, side, isLocked ? angleData.angle : angleData.angle); setSelectedId(i); }} className={`p-1 rounded ${isLocked ? 'bg-blue-100 text-blue-600' : 'hover:bg-blue-100 text-blue-400'}`}>{isLocked ? <Lock size={12} /> : <Unlock size={12} />}</button>
+                              </div>
+                            </div>
+                          );
+                        };
+
                         return (
-                          <tr key={i} className="cursor-pointer transition-colors" style={{ backgroundColor: isSelected ? `${THEME_ORANGE}10` : 'transparent' }} onClick={() => { setSelectedId(i); cancelDrawing(); }}>
+                          <tr key={i} className="cursor-pointer transition-colors group" style={{ backgroundColor: isSelected ? `${THEME_ORANGE}10` : 'transparent' }} onClick={() => { setSelectedId(i); cancelDrawing(); }}>
                             <td className="p-3 border-b"><div className="flex items-center gap-3"><div className="w-8 h-8 rounded-full text-white flex items-center justify-center font-bold text-xs" style={{ backgroundColor: isSelected ? THEME_ORANGE : BLUE_PURE }}>{i + 1}</div><div className="w-20 h-8 bg-white rounded border flex items-center justify-center overflow-hidden" style={{ borderColor: BLUE_LIGHT }}><svg width="80" height="30" viewBox="0 0 100 40"><defs><HalftoneWoodPattern /></defs><polygon points={profilePts.map(p => `${p.x},${p.y + 20}`).join(' ')} fill="url(#halftone-wood)" /><polygon points={profilePts.map(p => `${p.x},${p.y + 20}`).join(' ')} fill={isSelected ? THEME_ORANGE : BLUE_ULTRA_LIGHT} fillOpacity={0.2} stroke={isSelected ? THEME_ORANGE : BLUE_MEDIUM} strokeWidth={0.75} /></svg></div></div></td>
-                            <td className="p-3 border-b"><input type="number" step="0.1" value={formatLen(Math.hypot(l.x2 - l.x1, l.y2 - l.y1))} onClick={e => e.stopPropagation()} onChange={e => updateLineLength(i, parseInputToPx(e.target.value))} className="w-20 border rounded text-center text-xs font-bold p-1 outline-none focus:border-orange-500" /></td>
-                            <td className="p-3 border-b"><input type="number" value={l.thickness || thickness} onClick={e => e.stopPropagation()} onChange={e => updateLineThickness(i, Number(e.target.value))} className="w-16 border rounded text-center text-xs font-bold p-1 outline-none focus:border-orange-500" /></td>
-                            <td className="p-3 border-b text-center" onClick={(e) => { e.stopPropagation(); handleAngleSelection(angles.left.angle, `${i}-left`); }}><button className="text-xs px-2 py-1 rounded font-black border transition-all" style={{ backgroundColor: (activeMiterKey === `${i}-left`) ? THEME_ORANGE : 'transparent', color: (activeMiterKey === `${i}-left`) ? 'white' : THEME_ORANGE, borderColor: THEME_ORANGE }}>{angles.left.label}</button></td>
-                            <td className="p-3 border-b text-center" onClick={(e) => { e.stopPropagation(); handleAngleSelection(angles.right.angle, `${i}-right`); }}><button className="text-xs px-2 py-1 rounded font-black border transition-all" style={{ backgroundColor: (activeMiterKey === `${i}-right`) ? THEME_ORANGE : 'transparent', color: (activeMiterKey === `${i}-right`) ? 'white' : THEME_ORANGE, borderColor: THEME_ORANGE }}>{angles.right.label}</button></td>
+                            <td className="p-3 border-b text-center"><input type="number" value={l.thickness || thickness} onClick={e => e.stopPropagation()} onChange={e => updateLineThickness(i, Number(e.target.value))} className="w-12 border rounded text-center text-xs font-bold p-1 outline-none focus:border-orange-500" /></td>
+
+                            {/* Editable Outside Length */}
+                            <td className="p-3 border-b text-center font-bold text-xs">
+                              <input
+                                type="number"
+                                value={parseFloat(pxToDisplay(outsideLen).toFixed(precision === 0 ? 0 : precision))}
+                                onClick={e => e.stopPropagation()}
+                                onChange={e => {
+                                  updateLineLength(i, parseInputToPx(e.target.value));
+                                }}
+                                className="w-16 border rounded text-center text-xs font-bold p-1 outline-none focus:border-orange-500" style={{ color: BLUE_PURE }}
+                              />
+                            </td>
+
+                            {/* Editable Inside Length */}
+                            <td className="p-3 border-b text-center font-bold text-xs">
+                              <input
+                                type="number"
+                                value={parseFloat(pxToDisplay(insideLen).toFixed(precision === 0 ? 0 : precision))}
+                                onClick={e => e.stopPropagation()}
+                                onChange={e => {
+                                  const diff = outsideLen - insideLen;
+                                  const newIn = parseInputToPx(e.target.value);
+                                  if (newIn) updateLineLength(i, newIn + diff);
+                                }}
+                                className="w-16 border rounded text-center text-xs font-bold p-1 outline-none focus:border-orange-500 text-gray-400"
+                              />
+                            </td>
+
+                            <td className="p-3 border-b text-center">{renderAngleCell(angles.left, 'left')}</td>
+                            <td className="p-3 border-b text-center">{renderAngleCell(angles.right, 'right')}</td>
                           </tr>
                         );
                       })}
@@ -536,7 +950,7 @@ const App = () => {
       </div>
       <KeepMeInformedModal isOpen={showKeepMeInformed} onClose={() => setShowKeepMeInformed(false)} />
       <FeedbackModal isOpen={showFeedback} onClose={() => setShowFeedback(false)} />
-    </div>
+    </div >
   );
 };
 
