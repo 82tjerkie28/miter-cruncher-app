@@ -53,6 +53,7 @@ const App = () => {
   const [sawWarningDismissed, setSawWarningDismissed] = useState(false);
   const [miterWarningDismissed, setMiterWarningDismissed] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  const [isCompact, setIsCompact] = useState(false);
 
   const [logicalW, setLogicalW] = useState(800);
   const containerRef = useRef(null);
@@ -120,6 +121,7 @@ const App = () => {
         const { width, height } = containerRef.current.getBoundingClientRect();
         setLogicalW((width / height) * LOGICAL_H);
       }
+      setIsCompact(window.innerHeight < 800);
     };
 
     const handleKeyDown = (e) => {
@@ -459,11 +461,12 @@ const App = () => {
 
   const ToolBtn = ({ icon, label, active, onClick, children, style }) => (
     <div className={`w-full transition-all duration-300 ease-in-out bg-transparent overflow-hidden ${children && active ? 'rounded-xl mb-2' : ''}`}>
-      <button onClick={onClick} className={`p-2 w-full rounded-xl flex flex-col items-center justify-center gap-1 transition-all border shadow-sm h-[60px] min-h-[60px] z-10 relative ${active ? (children ? 'rounded-b-none border-b-0' : '') : ''}`} style={{ backgroundColor: active ? BLUE_PURE : 'white', color: active ? 'white' : BLUE_PURE, borderColor: active ? BLUE_PURE : BLUE_LIGHT, ...style }}>
-        {icon}<span className="text-[10px] font-black uppercase text-center leading-none mt-1">{label}</span>
+      <button onClick={onClick} className={`w-full rounded-xl flex flex-col items-center justify-center gap-1 transition-all border shadow-sm z-10 relative ${isCompact ? 'p-1 h-[45px] min-h-[45px]' : 'p-2 h-[60px] min-h-[60px]'} ${active ? (children ? 'rounded-b-none border-b-0' : '') : ''}`} style={{ backgroundColor: active ? BLUE_PURE : 'white', color: active ? 'white' : BLUE_PURE, borderColor: active ? BLUE_PURE : BLUE_LIGHT, ...style }}>
+        {React.cloneElement(icon, { size: isCompact ? 18 : 22 })}
+        <span className={`${isCompact ? 'text-[9px]' : 'text-[10px]'} font-black uppercase text-center leading-none mt-1`}>{label}</span>
       </button>
       {children && active && (
-        <div className="p-3 bg-blue-50 rounded-b-xl flex flex-col gap-3 animation-slide-down relative top-[-1px] pt-4" style={{ backgroundColor: '#F0F4FF' }}>
+        <div className={`bg-blue-50 rounded-b-xl flex flex-col animation-slide-down relative top-[-1px] ${isCompact ? 'p-2 gap-2 pt-3' : 'p-3 gap-3 pt-4'}`} style={{ backgroundColor: '#F0F4FF' }}>
           {children}
         </div>
       )}
@@ -471,7 +474,7 @@ const App = () => {
   );
 
   return (
-    <div className="flex flex-col h-screen font-['Space_Grotesk'] p-4 overflow-hidden select-none" style={{ backgroundColor: BLUE_ULTRA_LIGHT, color: BLUE_PURE }}>
+    <div className="flex flex-col min-h-screen font-['Space_Grotesk'] p-4 select-none" style={{ backgroundColor: BLUE_ULTRA_LIGHT, color: BLUE_PURE }}>
 
       {/* Mobile Only Message */}
       <div className="flex md:hidden flex-col items-center justify-center flex-1 p-8 text-center gap-6">
@@ -483,7 +486,7 @@ const App = () => {
       </div>
 
       {/* Desktop App Interface */}
-      <div className="hidden md:flex flex-1 gap-4 overflow-hidden">
+      <div className="hidden md:flex flex-1 gap-4">
         <div className="w-36 flex flex-col items-stretch gap-2 bg-white p-3 rounded-2xl border shadow-sm relative z-50 overflow-visible" style={{ borderColor: BLUE_LIGHT }}>
           <div className="mb-2 w-full flex justify-center">
             <img src={logo} alt="The Mighty Miter Cruncher" className="w-full h-auto object-contain" />
